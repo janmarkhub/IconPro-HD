@@ -40,6 +40,14 @@ export interface CustomSticker {
   texture: StickerTexture;
 }
 
+export interface Slice {
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface BatchEffects {
   outlineEnabled: boolean;
   glowEnabled: boolean;

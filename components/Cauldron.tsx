@@ -5,6 +5,7 @@ import { getPackRecommendations, getSubThemes, generatePackPrompts, generateIcon
 import { removeBgAndCenter } from '../utils/imageProcessor';
 import { GeneratedPackItem } from '../types';
 import { RetroTooltip } from './RetroTooltip';
+import { GoogleGenAI, Type } from "@google/genai";
 
 interface CauldronProps {
   onPackGenerated: (pack: GeneratedPackItem[]) => void;
@@ -69,23 +70,55 @@ export const Cauldron: React.FC<CauldronProps> = ({ onPackGenerated, onImportToS
       
       const gridDataUrl = await generateIconGrid(masterPrompt);
       setLastMasterGrid(gridDataUrl);
+      setCookProgress(40); setCookMessage("Locating individual icons...");
+      
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const detectResponse = await ai.models.generateContent({
+          model: "gemini-3-flash-preview",
+          contents: [
+              { text: "Identify bounding boxes for all 10 icons in this 5x2 sprite sheet. Return JSON: { boxes: [{x, y, w, h}] } in pixels." },
+              { inlineData: { mimeType: "image/png", data: gridDataUrl.split(',')[1] } }
+          ],
+          config: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                  type: Type.OBJECT,
+                  properties: {
+                      boxes: {
+                          type: Type.ARRAY,
+                          items: {
+                              type: Type.OBJECT,
+                              properties: {
+                                  x: { type: Type.NUMBER },
+                                  y: { type: Type.NUMBER },
+                                  w: { type: Type.NUMBER },
+                                  h: { type: Type.NUMBER }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+      });
+
+      const detectResult = JSON.parse(detectResponse.text || '{"boxes":[]}');
+      const boxes = detectResult.boxes;
+
       setCookProgress(60); setCookMessage("Extracting & Alpha Scrubbing...");
       
       const masterImg = new Image();
       await new Promise(res => { masterImg.onload = res; masterImg.src = gridDataUrl; });
       
       const results: GeneratedPackItem[] = [];
-      const cols = 5; const rows = 2;
-      const cellW = masterImg.width / cols; const cellH = masterImg.height / rows;
-      
       const canvas = document.createElement('canvas');
-      canvas.width = 1024; canvas.height = 1024;
       const ctx = canvas.getContext('2d')!;
       
-      for (let i = 0; i < 10; i++) {
-        const r = Math.floor(i / cols); const c = i % cols;
-        ctx.clearRect(0, 0, 1024, 1024);
-        ctx.drawImage(masterImg, c * cellW, r * cellH, cellW, cellH, 0, 0, 1024, 1024);
+      for (let i = 0; i < boxes.length; i++) {
+        const box = boxes[i];
+        canvas.width = box.w;
+        canvas.height = box.h;
+        ctx.clearRect(0, 0, box.w, box.h);
+        ctx.drawImage(masterImg, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
         
         const intermediate = new Image();
         intermediate.src = canvas.toDataURL('image/png');
@@ -100,12 +133,13 @@ export const Cauldron: React.FC<CauldronProps> = ({ onPackGenerated, onImportToS
             blob: cleanBlob, 
             previewUrl: cleanUrl 
         });
-        setCookProgress(60 + (i / 10) * 40);
+        setCookProgress(60 + (i / boxes.length) * 40);
       }
       setLastGeneratedPack(results);
       onPackGenerated(results);
       setCookMessage("Brewing Complete!");
     } catch (e) {
+      console.error(e);
       onError("Cauldron Overload", "Batch generation failed.");
     } finally {
       setTimeout(() => setIsCooking(false), 1000);
