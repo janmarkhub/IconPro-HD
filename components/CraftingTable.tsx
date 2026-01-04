@@ -2,11 +2,12 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { 
   Scissors, Upload, RefreshCw, ArrowRightCircle, Sparkles, Box, 
-  Info, Image as ImageIcon, Hammer, Move, Maximize, Target, Eraser, Settings2 
+  Info, Image as ImageIcon, Hammer, Move, Maximize, Target, Eraser, Settings2, MousePointer2 
 } from 'lucide-react';
 import { removeBgAndCenter } from '../utils/imageProcessor';
 import { GeneratedPackItem } from '../types';
 import { RetroTooltip } from './RetroTooltip';
+import { GoogleGenAI, Type } from "@google/genai";
 
 interface CraftingTableProps {
   onImportToSmithy: (pack: GeneratedPackItem[]) => void;
@@ -15,8 +16,8 @@ interface CraftingTableProps {
 
 export const CraftingTable: React.FC<CraftingTableProps> = ({ onImportToSmithy, onError }) => {
   const [sourceImage, setSourceImage] = useState<string | null>(null);
-  const [rows, setRows] = useState(3);
-  const [cols, setCols] = useState(3);
+  const [rows, setRows] = useState(2);
+  const [cols, setCols] = useState(5);
   const [offsetX, setOffsetX] = useState(0);
   const [offsetY, setOffsetY] = useState(0);
   const [gapX, setGapX] = useState(0);
@@ -25,10 +26,14 @@ export const CraftingTable: React.FC<CraftingTableProps> = ({ onImportToSmithy, 
   const [cellHeight, setCellHeight] = useState(0);
   
   const [isSlicing, setIsSlicing] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
   const [slicedItems, setSlicedItems] = useState<GeneratedPackItem[]>([]);
   const [keepInternal, setKeepInternal] = useState(true);
   const [aggression, setAggression] = useState(80);
   
+  const [dragMode, setDragMode] = useState<'none' | 'grid' | 'resize'>('none');
+  const [startPos, setStartPos] = useState({ x: 0, y: 0 });
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -43,10 +48,12 @@ export const CraftingTable: React.FC<CraftingTableProps> = ({ onImportToSmithy, 
         const img = new Image();
         img.onload = () => {
           imgRef.current = img;
-          // Initial guesses
-          setCellWidth(Math.floor(img.width / cols));
-          setCellHeight(Math.floor(img.height / rows));
-          drawGrid();
+          setCellWidth(Math.floor(img.width / cols) - 10);
+          setCellHeight(Math.floor(img.height / rows) - 10);
+          setOffsetX(5);
+          setOffsetY(5);
+          setGapX(10);
+          setGapY(10);
         };
         img.src = url;
         setSlicedItems([]);
@@ -61,29 +68,35 @@ export const CraftingTable: React.FC<CraftingTableProps> = ({ onImportToSmithy, 
     if (!canvas || !img) return;
 
     const ctx = canvas.getContext('2d')!;
+    const rect = canvas.getBoundingClientRect();
     canvas.width = img.width;
     canvas.height = img.height;
     
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0);
 
-    // Draw Grid Overlay
-    ctx.strokeStyle = 'rgba(255, 255, 0, 0.8)';
-    ctx.lineWidth = Math.max(2, img.width / 500);
-    ctx.setLineDash([10, 5]);
+    // Grid Visuals
+    ctx.strokeStyle = '#ffff00';
+    ctx.lineWidth = Math.max(2, img.width / 400);
+    ctx.setLineDash([8, 4]);
 
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const x = offsetX + c * (cellWidth + gapX);
         const y = offsetY + r * (cellHeight + gapY);
+        
         ctx.strokeRect(x, y, cellWidth, cellHeight);
         
-        // Cell Index
-        ctx.fillStyle = 'rgba(0,0,0,0.5)';
-        ctx.fillRect(x, y, 20 * (img.width / 800), 20 * (img.width / 800));
-        ctx.fillStyle = 'white';
-        ctx.font = `${Math.floor(14 * (img.width / 800))}px Space Mono`;
-        ctx.fillText(`${r},${c}`, x + 2, y + 14 * (img.width / 800));
+        // Handle visualization
+        ctx.fillStyle = '#ffff00';
+        ctx.fillRect(x + cellWidth - 5, y + cellHeight - 5, 10, 10);
+        
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        const tagSize = Math.floor(18 * (img.width / 1024));
+        ctx.fillRect(x, y, tagSize * 2, tagSize);
+        ctx.fillStyle = '#fff';
+        ctx.font = `bold ${tagSize * 0.7}px Space Mono`;
+        ctx.fillText(`${r},${c}`, x + 4, y + tagSize * 0.75);
       }
     }
   }, [rows, cols, offsetX, offsetY, gapX, gapY, cellWidth, cellHeight]);
@@ -91,6 +104,92 @@ export const CraftingTable: React.FC<CraftingTableProps> = ({ onImportToSmithy, 
   useEffect(() => {
     drawGrid();
   }, [drawGrid]);
+
+  const handleSmartScan = async () => {
+    if (!sourceImage) return onError("Visuals Missing", "Input a sprite sheet first.");
+    setIsScanning(true);
+    try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const response = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: [
+                { text: "Analyze this sprite sheet. Estimate the grid configuration (rows, cols) and the approximate padding/offset. Return JSON: { rows: number, cols: number, offsetX: number, offsetY: number, cellWidth: number, cellHeight: number, gapX: number, gapY: number }." },
+                { inlineData: { mimeType: "image/png", data: sourceImage.split(',')[1] } }
+            ],
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                        rows: { type: Type.NUMBER },
+                        cols: { type: Type.NUMBER },
+                        offsetX: { type: Type.NUMBER },
+                        offsetY: { type: Type.NUMBER },
+                        cellWidth: { type: Type.NUMBER },
+                        cellHeight: { type: Type.NUMBER },
+                        gapX: { type: Type.NUMBER },
+                        gapY: { type: Type.NUMBER }
+                    },
+                    required: ["rows", "cols", "offsetX", "offsetY", "cellWidth", "cellHeight", "gapX", "gapY"]
+                }
+            }
+        });
+        const r = JSON.parse(response.text || '{}');
+        setRows(r.rows); setCols(r.cols);
+        setOffsetX(r.offsetX); setOffsetY(r.offsetY);
+        setCellWidth(r.cellWidth); setCellHeight(r.cellHeight);
+        setGapX(r.gapX); setGapY(r.gapY);
+    } catch (e) {
+        onError("AI Alignment Failed", "Vision link unstable. Manual alignment active.");
+    } finally {
+        setIsScanning(false);
+    }
+  };
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (!imgRef.current || !canvasRef.current) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const scaleX = imgRef.current.width / rect.width;
+    const scaleY = imgRef.current.height / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+
+    // Check if clicking resize handle (bottom-right of cell 0,0 for simplicity or any cell)
+    // We'll use the first cell as the "Master Resize" handle
+    const handleX = offsetX + cellWidth;
+    const handleY = offsetY + cellHeight;
+    const dist = Math.sqrt(Math.pow(x - handleX, 2) + Math.pow(y - handleY, 2));
+
+    if (dist < 30) {
+      setDragMode('resize');
+    } else {
+      setDragMode('grid');
+    }
+    setStartPos({ x, y });
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (dragMode === 'none' || !imgRef.current || !canvasRef.current) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const scaleX = imgRef.current.width / rect.width;
+    const scaleY = imgRef.current.height / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+
+    const dx = x - startPos.x;
+    const dy = y - startPos.y;
+
+    if (dragMode === 'grid') {
+      setOffsetX(prev => prev + dx);
+      setOffsetY(prev => prev + dy);
+    } else if (dragMode === 'resize') {
+      setCellWidth(prev => Math.max(10, prev + dx));
+      setCellHeight(prev => Math.max(10, prev + dy));
+    }
+    setStartPos({ x, y });
+  };
+
+  const handleMouseUp = () => setDragMode('none');
 
   const startSlicing = async () => {
     if (!imgRef.current) return;
@@ -127,117 +226,117 @@ export const CraftingTable: React.FC<CraftingTableProps> = ({ onImportToSmithy, 
     }
   };
 
-  const ControlSlider = ({ label, value, min, max, onChange, icon: Icon }: any) => (
-    <div className="space-y-1">
-      <div className="flex justify-between items-center text-[7px] font-black uppercase text-[#333]">
-        <span className="flex items-center gap-1">{Icon && <Icon size={8}/>} {label}</span>
-        <span>{value}</span>
-      </div>
-      <input 
-        type="range" min={min} max={max} value={value} 
-        onChange={e => onChange(+e.target.value)} 
-        className="w-full h-1 bg-black/10 rounded-none accent-indigo-600 cursor-pointer"
-      />
-    </div>
-  );
-
   return (
-    <div className="bg-[#c6c6c6] border-8 border-t-[#ffffff] border-l-[#ffffff] border-r-[#555555] border-b-[#555555] p-8 rounded-none shadow-2xl font-mono relative overflow-hidden">
-      <div className="flex items-center gap-6 mb-8 border-b-4 border-[#555] pb-6">
-          <div className="p-4 bg-[#4e2c0e] border-4 border-[#7a4b1e] shadow-[4px_4px_0_rgba(0,0,0,0.3)]">
-            <Hammer className="text-white" size={32} />
+    <div className="bg-[#1a1a1a] border-8 border-[#333] p-8 rounded-none shadow-2xl font-mono relative overflow-hidden select-none">
+      <div className="flex items-center justify-between mb-8 border-b-2 border-white/10 pb-6">
+          <div className="flex items-center gap-6">
+            <div className="p-4 bg-[#c6c6c6] border-2 border-black shadow-[4px_4px_0_rgba(0,0,0,1)]">
+                <Hammer className="text-black" size={32} />
+            </div>
+            <div>
+                <h2 className="text-2xl font-black uppercase text-white tracking-widest italic">CRAFTING_BOARD.EXE</h2>
+                <p className="text-[9px] text-indigo-400 font-bold uppercase tracking-widest">Photoshop-style Interactive Sprite Extractor</p>
+            </div>
           </div>
-          <div>
-            <h2 className="text-3xl font-black uppercase text-white drop-shadow-[2px_2px_0px_rgba(0,0,0,1)] tracking-tighter italic">Crafting Table</h2>
-            <p className="text-[10px] text-indigo-900 font-bold uppercase tracking-widest">Interactive Sprite Extraction Matrix</p>
+          <div className="flex gap-4">
+              <button 
+                onClick={handleSmartScan} 
+                disabled={isScanning || !sourceImage}
+                className="win-btn bg-indigo-600 text-white gap-2 h-12 px-6"
+              >
+                {isScanning ? <RefreshCw className="animate-spin" size={16}/> : <Sparkles size={16}/>} SMART_SYNC
+              </button>
+              <button 
+                onClick={() => onImportToSmithy(slicedItems)} 
+                disabled={slicedItems.length === 0}
+                className="win-btn bg-green-700 text-white gap-2 h-12 px-6"
+              >
+                <ArrowRightCircle size={16}/> SMITHY_ALL
+              </button>
           </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-        {/* Editor View */}
-        <div className="lg:col-span-8 flex flex-col gap-6">
-            <div className="retro-panel p-2 flex flex-col items-center justify-center relative bg-black/60 border-4 min-h-[500px] overflow-hidden">
+        <div className="lg:col-span-8 space-y-4">
+            <div 
+                className="relative bg-black border-4 border-[#333] min-h-[500px] flex items-center justify-center cursor-move overflow-hidden"
+                onMouseDown={handleMouseDown}
+                onMouseMove={handleMouseMove}
+                onMouseUp={handleMouseUp}
+                onMouseLeave={handleMouseUp}
+            >
                 {sourceImage ? (
-                    <div className="relative w-full h-full flex items-center justify-center cursor-crosshair">
-                        <canvas 
-                            ref={canvasRef} 
-                            className="max-w-full max-h-[600px] object-contain shadow-2xl pixelated"
-                        />
-                    </div>
+                    <canvas ref={canvasRef} className="max-w-full max-h-[700px] object-contain pixelated pointer-events-none" />
                 ) : (
-                    <div className="flex flex-col items-center opacity-30 text-white p-20 text-center">
+                    <div className="flex flex-col items-center opacity-20 text-white text-center p-20">
                         <Upload size={64} className="mb-6 animate-bounce" />
-                        <p className="text-sm font-black uppercase tracking-widest">Input Raw Sprite Sheet</p>
+                        <p className="text-sm font-black uppercase">Click to Load Sprite Sheet</p>
+                        <input type="file" ref={fileInputRef} onChange={handleFileChange} className="absolute inset-0 opacity-0 cursor-pointer" accept="image/*" />
                     </div>
                 )}
-                <input type="file" ref={fileInputRef} onChange={handleFileChange} className="absolute inset-0 opacity-0 cursor-pointer" accept="image/*" />
+                {dragMode !== 'none' && (
+                    <div className="absolute top-4 right-4 bg-indigo-600 text-white text-[8px] font-black px-2 py-1 uppercase shadow-lg">
+                        {dragMode.toUpperCase()}ING...
+                    </div>
+                )}
             </div>
 
-            <div className="bg-[#8b8b8b] border-4 border-black p-4 grid grid-cols-2 md:grid-cols-3 gap-6 shadow-inner">
-                <div className="space-y-4">
-                    <h4 className="text-[8px] font-black uppercase border-b border-black/20 pb-1 flex items-center gap-1"><Maximize size={10}/> Grid Geometry</h4>
-                    <ControlSlider label="Grid Rows" value={rows} min={1} max={20} onChange={setRows} />
-                    <ControlSlider label="Grid Cols" value={cols} min={1} max={20} onChange={setCols} />
-                    <ControlSlider label="Cell Width" value={cellWidth} min={10} max={imgRef.current?.width || 1024} onChange={setCellWidth} />
-                    <ControlSlider label="Cell Height" value={cellHeight} min={10} max={imgRef.current?.height || 1024} onChange={setCellHeight} />
-                </div>
-                <div className="space-y-4">
-                    <h4 className="text-[8px] font-black uppercase border-b border-black/20 pb-1 flex items-center gap-1"><Move size={10}/> Global Alignment</h4>
-                    <ControlSlider label="X Offset" value={offsetX} min={-500} max={500} onChange={setOffsetX} icon={Move} />
-                    <ControlSlider label="Y Offset" value={offsetY} min={-500} max={500} onChange={setOffsetY} icon={Move} />
-                    <ControlSlider label="X Gap" value={gapX} min={-100} max={100} onChange={setGapX} />
-                    <ControlSlider label="Y Gap" value={gapY} min={-100} max={100} onChange={setGapY} />
-                </div>
-                <div className="space-y-4">
-                    <h4 className="text-[8px] font-black uppercase border-b border-black/20 pb-1 flex items-center gap-1"><Settings2 size={10}/> Extraction Prep</h4>
-                    <div className="flex items-center justify-between p-2 bg-[#ccc] border border-black/20">
-                        <span className="text-[7px] font-black uppercase">Alpha Scrub</span>
-                        <button 
-                            onClick={() => setKeepInternal(!keepInternal)}
-                            className={`px-2 py-1 border text-[6px] font-black transition-all ${keepInternal ? 'bg-indigo-600 text-white' : 'bg-[#bbb]'}`}
-                        >
-                            {keepInternal ? 'KEEP_FILL' : 'WIPE_FILL'}
-                        </button>
+            <div className="grid grid-cols-4 gap-4 p-4 bg-[#222] border border-white/5 shadow-inner">
+                <div className="space-y-2">
+                    <label className="text-[8px] font-black text-indigo-300 uppercase">Grid Config</label>
+                    <div className="flex gap-2">
+                        <input type="number" value={rows} onChange={e => setRows(+e.target.value)} className="w-1/2 bg-black border border-white/10 p-2 text-white text-xs font-black" />
+                        <input type="number" value={cols} onChange={e => setCols(+e.target.value)} className="w-1/2 bg-black border border-white/10 p-2 text-white text-xs font-black" />
                     </div>
-                    <ControlSlider label="Aggression" value={aggression} min={0} max={200} onChange={setAggression} icon={Target} />
+                </div>
+                <div className="space-y-2">
+                    <label className="text-[8px] font-black text-indigo-300 uppercase">Gaps (X/Y)</label>
+                    <div className="flex gap-2">
+                        <input type="number" value={gapX} onChange={e => setGapX(+e.target.value)} className="w-1/2 bg-black border border-white/10 p-2 text-white text-xs font-black" />
+                        <input type="number" value={gapY} onChange={e => setGapY(+e.target.value)} className="w-1/2 bg-black border border-white/10 p-2 text-white text-xs font-black" />
+                    </div>
+                </div>
+                <div className="space-y-2">
+                    <label className="text-[8px] font-black text-indigo-300 uppercase">Alpha Focus</label>
+                    <div 
+                        onClick={() => setKeepInternal(!keepInternal)}
+                        className={`w-full p-2 border cursor-pointer flex items-center justify-center transition-all ${keepInternal ? 'bg-indigo-600 border-white text-white' : 'bg-black border-white/10 text-white/40'}`}
+                    >
+                        <span className="text-[9px] font-black uppercase">{keepInternal ? 'KEEP_FILLS' : 'CLEAR_ALL'}</span>
+                    </div>
+                </div>
+                <div className="flex items-end">
                     <button 
                         onClick={startSlicing} 
-                        disabled={isSlicing || !sourceImage} 
-                        className="w-full win-btn bg-indigo-600 text-white py-4 gap-3 text-xs shadow-[4px_4px_0_rgba(0,0,0,1)] active:shadow-none translate-y-0 active:translate-y-1 transition-all"
+                        disabled={isSlicing || !sourceImage}
+                        className="w-full bg-white text-black h-10 text-[10px] font-black uppercase hover:bg-indigo-400 transition-all shadow-[4px_4px_0_rgba(255,255,255,0.2)]"
                     >
-                        {isSlicing ? <RefreshCw className="animate-spin" size={18}/> : <Scissors size={18}/>} EXTRACT_ALL
+                        {isSlicing ? <RefreshCw className="animate-spin" size={16}/> : <Scissors size={16}/>} RUN_EXTRACT
                     </button>
                 </div>
             </div>
         </div>
 
-        {/* Output Inventory */}
-        <div className="lg:col-span-4 flex flex-col gap-6">
-            <div className="flex items-center justify-between">
-                <h3 className="text-[11px] font-black uppercase tracking-widest flex items-center gap-2">Output Inventory</h3>
-                {slicedItems.length > 0 && (
-                    <button onClick={() => onImportToSmithy(slicedItems)} className="win-btn bg-green-700 text-white px-4 py-2 gap-2 text-[8px] border-2 shadow-[2px_2px_0_rgba(0,0,0,1)]">
-                        <ArrowRightCircle size={14}/> SMITHY_ALL
-                    </button>
-                )}
-            </div>
-
-            <div className="retro-inset bg-black/5 flex-1 min-h-[500px] p-4 overflow-y-auto custom-scrollbar border-4 shadow-inner">
+        <div className="lg:col-span-4 flex flex-col gap-4">
+            <h3 className="text-[10px] font-black text-white/40 uppercase tracking-widest flex items-center gap-2">
+                <Box size={14}/> OUTPUT_BUFFER
+            </h3>
+            <div className="bg-black/40 border-4 border-[#333] flex-1 min-h-[500px] p-4 overflow-y-auto custom-scrollbar shadow-inner">
                 {slicedItems.length > 0 ? (
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-2 gap-4">
                         {slicedItems.map((item, idx) => (
-                            <div key={idx} className="aspect-square bg-white border-2 border-black p-2 flex flex-col items-center justify-center transparent-checker group relative overflow-hidden shadow-md hover:scale-[1.05] transition-transform">
+                            <div key={idx} className="aspect-square bg-white border border-black p-2 flex items-center justify-center transparent-checker group relative overflow-hidden shadow-2xl hover:scale-105 transition-transform">
                                 <img src={item.previewUrl} className="w-full h-full object-contain pixelated" />
-                                <div className="absolute bottom-0 left-0 right-0 bg-black/80 text-white text-[5px] p-1 font-bold text-center opacity-0 group-hover:opacity-100 transition-opacity">
-                                    {item.label}
+                                <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                                    <span className="text-[7px] text-white font-black uppercase bg-black px-2 py-1">READY</span>
                                 </div>
                             </div>
                         ))}
                     </div>
                 ) : (
-                    <div className="h-full flex flex-col items-center justify-center opacity-10 p-10 text-center">
-                        <Box size={80} className="mb-6" />
-                        <p className="text-xs font-black uppercase">Crafting Inventory Empty</p>
+                    <div className="h-full flex flex-col items-center justify-center opacity-10">
+                        <ImageIcon size={64} className="mb-4" />
+                        <p className="text-[10px] font-black uppercase">Buffer Empty</p>
                     </div>
                 )}
             </div>

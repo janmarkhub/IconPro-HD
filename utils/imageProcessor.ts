@@ -33,9 +33,6 @@ export function calculateFidelity(img: HTMLImageElement): number {
     return Math.min(100, Math.sqrt(area) / 1024 * 100);
 }
 
-/**
- * Advanced Denoise: Bilateral filtering logic to smooth flat areas while protecting edges.
- */
 function applySmartCleanup(ctx: CanvasRenderingContext2D, width: number, height: number, intensity: number) {
     if (intensity <= 0) return;
     const imageData = ctx.getImageData(0, 0, width, height);
@@ -86,7 +83,6 @@ export async function removeBgAndCenter(img: HTMLImageElement, aggression: numbe
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = imageData.data;
 
-    // Background key sampling (corners)
     const samples = [
         [0,0], [canvas.width-1, 0], [0, canvas.height-1], [canvas.width-1, canvas.height-1]
     ];
@@ -97,39 +93,42 @@ export async function removeBgAndCenter(img: HTMLImageElement, aggression: numbe
     });
     const bgR = avgR / 4, bgG = avgG / 4, bgB = avgB / 4;
 
-    const tolerance = aggression + 10;
-    let minX = canvas.width, minY = canvas.height, maxX = 0, maxY = 0;
-    let hasContent = false;
-
-    // Pass 1: Global background extraction with Flood-Fill style logic to "Keep Internal"
-    // We only remove background that is connected to the edges to avoid "cutting" the inside of the icon
-    const mask = new Uint8Array(canvas.width * canvas.height);
+    const tolerance = aggression + 15;
+    const visited = new Uint8Array(canvas.width * canvas.height);
     const queue: [number, number][] = [];
 
-    // Add edges to queue
-    for (let x = 0; x < canvas.width; x++) { queue.push([x, 0]); queue.push([x, canvas.height - 1]); }
-    for (let y = 0; y < canvas.height; y++) { queue.push([0, y]); queue.push([canvas.width - 1, y]); }
+    // Flood fill only if we want to keep internal colors
+    if (keepInternal) {
+        for (let x = 0; x < canvas.width; x++) { queue.push([x, 0]); queue.push([x, canvas.height - 1]); }
+        for (let y = 0; y < canvas.height; y++) { queue.push([0, y]); queue.push([canvas.width - 1, y]); }
 
-    while (queue.length > 0) {
-        const [x, y] = queue.pop()!;
-        const idx = y * canvas.width + x;
-        if (mask[idx]) continue;
+        while (queue.length > 0) {
+            const [x, y] = queue.pop()!;
+            const idx = y * canvas.width + x;
+            if (visited[idx]) continue;
 
-        const i = idx * 4;
-        const dist = Math.sqrt(Math.pow(data[i]-bgR,2) + Math.pow(data[i+1]-bgG,2) + Math.pow(data[i+2]-bgB,2));
-        
-        if (dist < tolerance) {
-            mask[idx] = 1; // Mark as background
-            data[i+3] = 0; // Set transparent
-            // Check neighbors
-            if (x > 0) queue.push([x - 1, y]);
-            if (x < canvas.width - 1) queue.push([x + 1, y]);
-            if (y > 0) queue.push([x, y - 1]);
-            if (y < canvas.height - 1) queue.push([x, y + 1]);
+            const i = idx * 4;
+            const dist = Math.sqrt(Math.pow(data[i]-bgR,2) + Math.pow(data[i+1]-bgG,2) + Math.pow(data[i+2]-bgB,2));
+            
+            if (dist < tolerance) {
+                visited[idx] = 1;
+                data[i+3] = 0;
+                if (x > 0) queue.push([x - 1, y]);
+                if (x < canvas.width - 1) queue.push([x + 1, y]);
+                if (y > 0) queue.push([x, y - 1]);
+                if (y < canvas.height - 1) queue.push([x, y + 1]);
+            }
+        }
+    } else {
+        // Global removal (wipe all matching colors regardless of connectivity)
+        for (let i = 0; i < data.length; i += 4) {
+            const dist = Math.sqrt(Math.pow(data[i]-bgR,2) + Math.pow(data[i+1]-bgG,2) + Math.pow(data[i+2]-bgB,2));
+            if (dist < tolerance) data[i+3] = 0;
         }
     }
 
-    // Pass 2: Calculate bounds for centering based on remaining content
+    let minX = canvas.width, minY = canvas.height, maxX = 0, maxY = 0;
+    let hasContent = false;
     for (let i = 0; i < data.length; i += 4) {
         if (data[i+3] > 0) {
             const x = (i/4) % canvas.width;
@@ -150,7 +149,7 @@ export async function removeBgAndCenter(img: HTMLImageElement, aggression: numbe
     const fctx = final.getContext('2d')!;
     fctx.imageSmoothingEnabled = false;
 
-    const scale = Math.min(920 / contentW, 920 / contentH);
+    const scale = Math.min(960 / contentW, 960 / contentH);
     const dw = contentW * scale, dh = contentH * scale;
     const dx = (1024 - dw) / 2, dy = (1024 - dh) / 2;
 
@@ -214,13 +213,10 @@ export async function upscaleAndEditImage(
     if (effects.removeBackground) {
         const mData = mctx.getImageData(0,0,targetSize,targetSize);
         const d = mData.data;
-        // Background extraction logic for Smithy should be consistent with the smarter one
         const bgR = d[0], bgG = d[1], bgB = d[2];
         const tol = effects.scrubAggression + 15;
         
-        // Use simpler threshold for bulk smithy if user prefers, but smarter is better
         for (let i=0; i<d.length; i+=4) {
-            // FIXED: Corrected typo 'bb' to 'bgB' on the следующей строке
             const dist = Math.sqrt(Math.pow(d[i]-bgR,2) + Math.pow(d[i+1]-bgG,2) + Math.pow(d[i+2]-bgB,2));
             if (dist < tol) d[i+3] = 0;
         }
@@ -244,7 +240,7 @@ export async function upscaleAndEditImage(
         ctx.save();
         const thickness = effects.outlineWidth * (targetSize / 512);
         ctx.globalCompositeOperation = 'destination-over';
-        ctx.fillStyle = TooltipColor || effects.outlineColor;
+        ctx.fillStyle = effects.outlineColor;
         ctx.globalAlpha = effects.outlineOpacity;
         for(let i=0; i<360; i += 20) {
             let a = (i * Math.PI) / 180;
