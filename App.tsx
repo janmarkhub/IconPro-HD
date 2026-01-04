@@ -12,12 +12,12 @@ import { FloatingHelp } from './components/FloatingHelp';
 import { ControlMatrix } from './components/ControlMatrix';
 import { PaletteForge } from './components/PaletteForge';
 import { RetroTooltip } from './components/RetroTooltip';
-import { ProcessedFile, Resolution, ExportFormat, BatchEffects, DesktopAssignments, GeneratedPackItem } from './types';
+import { ProcessedFile, Resolution, ExportFormat, BatchEffects, DesktopAssignments, GeneratedPackItem, PersonBio } from './types';
 import { parseIcoAndGetLargestImage } from './utils/icoParser';
 import { upscaleAndEditImage, DEFAULT_EFFECTS, calculateFidelity, removeBgAndCenter } from './utils/imageProcessor';
 import { wrapPngInIco } from './utils/icoEncoder';
-import { generateIconImage } from './utils/aiVision';
-import { Hammer, Wand2, Monitor, AlertTriangle, Coffee, Sun, Moon, Sparkles, LayoutGrid } from 'lucide-react';
+import { generateIconImage, getPersonProfile, generatePackPrompts, generateIconGrid } from './utils/aiVision';
+import { Hammer, Wand2, Monitor, AlertTriangle, Coffee, Sun, Moon, Sparkles } from 'lucide-react';
 
 declare var JSZip: any;
 declare var saveAs: any;
@@ -44,12 +44,18 @@ const App: React.FC = () => {
   const [desktopAssignments, setDesktopAssignments] = useState<DesktopAssignments>({});
   const [lastAction, setLastAction] = useState<string | null>(null);
   const [errorInfo, setErrorInfo] = useState<{ msg: string, fix: string } | null>(null);
+  const [currentPerson, setCurrentPerson] = useState<PersonBio | null>(null);
 
-  // Selection state
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [lastSelectedId, setLastSelectedId] = useState<string | null>(null);
+  const [toolboxOpen, setToolboxOpen] = useState(true);
 
   const sourceCache = useRef<Map<string, FileSource>>(new Map());
+
+  const triggerGratification = (action: string) => {
+    setLastAction(action);
+    setTimeout(() => setLastAction(null), 3000);
+  };
 
   const applyEffectsToFiles = useCallback(async () => {
     if (files.length === 0) return;
@@ -66,13 +72,8 @@ const App: React.FC = () => {
       } catch (err) { return file; }
     }));
     setFiles(updatedFiles);
-    triggerGratification('LOOT REFORGED');
+    triggerGratification('SMITHY_SYNC');
   }, [effects, resolution, exportFormat, files.length]);
-
-  const triggerGratification = (action: string) => {
-    setLastAction(action);
-    setTimeout(() => setLastAction(null), 3000);
-  };
 
   useEffect(() => {
     const timer = setTimeout(applyEffectsToFiles, 300);
@@ -85,12 +86,7 @@ const App: React.FC = () => {
     for (const file of selectedFiles) {
       const id = crypto.randomUUID();
       try {
-        let rawBlob: Blob;
-        if (file.name.toLowerCase().endsWith('.ico')) {
-          rawBlob = await parseIcoAndGetLargestImage(file);
-        } else {
-          rawBlob = file;
-        }
+        let rawBlob = file.name.toLowerCase().endsWith('.ico') ? await parseIcoAndGetLargestImage(file) : file;
         const rawUrl = URL.createObjectURL(rawBlob);
         const tempImg = new Image();
         await new Promise(res => { tempImg.onload = res; tempImg.src = rawUrl; });
@@ -102,66 +98,79 @@ const App: React.FC = () => {
           blob: initialPng, previewUrl: URL.createObjectURL(initialPng), status: 'completed' as const, width: resolution, height: resolution,
           originalType: file.type, fidelityScore: fidelity
         });
-      } catch (e) { 
-        setErrorInfo({ msg: `Failed to process image: ${file.name}`, fix: "Try a standard PNG or JPG file." });
-      }
+      } catch (e) { setErrorInfo({ msg: "Asset Error", fix: "Try a cleaner image file." }); }
     }
     setFiles(prev => [...newFiles, ...prev]);
     setIsProcessing(false);
-    triggerGratification(`FOUND ${newFiles.length} NEW ITEMS`);
+    triggerGratification('ASSETS_IMPORTED');
   }, [resolution, effects, exportFormat]);
 
-  const handleImportPackToSmithy = useCallback(async (pack: GeneratedPackItem[]) => {
+  const handleTeleport = async (name: string) => {
     setIsProcessing(true);
-    const newFiles = [];
-    for (const item of pack) {
-      const id = crypto.randomUUID();
-      if (!item.blob) continue;
+    triggerGratification('WARP_INITIATED');
+    try {
+      const profile = await getPersonProfile(name);
+      if (!profile) {
+        setErrorInfo({ msg: "Teleportation Failed", fix: "Target digital footprint not found. Try a famous icon." });
+        return;
+      }
+      setCurrentPerson(profile);
       
-      const tempImg = new Image();
-      const url = URL.createObjectURL(item.blob);
-      await new Promise(res => { tempImg.onload = res; tempImg.src = url; });
+      const { items, masterPrompt } = await generatePackPrompts(profile.name, profile.vibe, "Clean High Detail Professional");
+      const gridDataUrl = await generateIconGrid(masterPrompt);
+      const masterImg = new Image();
+      await new Promise(res => { masterImg.onload = res; masterImg.src = gridDataUrl; });
       
-      const fidelity = 100; 
-      sourceCache.current.set(id, { id, image: tempImg, rawUrl: url, fidelity, prompt: item.prompt, label: item.label });
+      const cols = 5; const cellW = masterImg.width / cols; const cellH = masterImg.height / 2;
+      const sliceCanvas = document.createElement('canvas');
+      sliceCanvas.width = 1024; sliceCanvas.height = 1024; // High res slices
+      const sctx = sliceCanvas.getContext('2d')!;
       
-      const initialPng = await upscaleAndEditImage(tempImg, resolution, effects, undefined, fidelity);
-      newFiles.push({
-        id, originalName: `${item.label}.png`, newName: `${item.label}.${exportFormat}`,
-        blob: initialPng, previewUrl: URL.createObjectURL(initialPng), status: 'completed' as const, width: resolution, height: resolution,
-        originalType: 'image/png', fidelityScore: fidelity, isAiGenerated: true
-      });
-    }
-    setFiles(prev => [...newFiles, ...prev]);
-    setIsProcessing(false);
-    setMode('upscale');
-    triggerGratification('PACK SMELTED SUCCESS');
-  }, [resolution, effects, exportFormat]);
+      const newAssignments: any = {};
+      const slotMap: (keyof DesktopAssignments)[] = ['recycleBinEmpty', 'recycleBinFull', 'startButtonNormal', 'myPc', 'controlPanel', 'network', 'account', 'folder', 'extra1', 'extra2'];
 
-  const handleToggleSelect = (id: string, isShift: boolean) => {
-    if (isShift && lastSelectedId) {
-      const allIds = files.map(f => f.id);
-      const start = allIds.indexOf(lastSelectedId);
-      const end = allIds.indexOf(id);
-      const range = allIds.slice(Math.min(start, end), Math.max(start, end) + 1);
-      setSelectedIds(prev => Array.from(new Set([...prev, ...range])));
-    } else {
-      setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
-      setLastSelectedId(id);
+      for (let i = 0; i < 10; i++) {
+        const r = Math.floor(i / cols); const c = i % cols;
+        sctx.clearRect(0, 0, 1024, 1024);
+        sctx.drawImage(masterImg, c * cellW, r * cellH, cellW, cellH, 128, 128, 768, 768);
+        const sliceImg = new Image();
+        sliceImg.src = sliceCanvas.toDataURL('image/png');
+        await new Promise(res => sliceImg.onload = res);
+        
+        const cleanBlob = await removeBgAndCenter(sliceImg);
+        const id = crypto.randomUUID();
+        const url = URL.createObjectURL(cleanBlob);
+        const finalImg = new Image();
+        await new Promise(res => { finalImg.onload = res; finalImg.src = url; });
+        
+        sourceCache.current.set(id, { id, image: finalImg, rawUrl: url, fidelity: 100, prompt: items[i].label, label: items[i].label });
+        
+        const fileObj: ProcessedFile = {
+          id, originalName: `${items[i].label}.png`, newName: `${items[i].label}.${exportFormat}`,
+          blob: cleanBlob, previewUrl: url, status: 'completed', width: resolution, height: resolution,
+          originalType: 'image/png', fidelityScore: 100, isAiGenerated: true
+        };
+        
+        setFiles(prev => [...prev, fileObj]);
+        newAssignments[slotMap[i]] = id;
+      }
+      setDesktopAssignments(newAssignments);
+      triggerGratification(`ARRIVED AT ${profile.name.toUpperCase()}`);
+    } catch (e) {
+      setErrorInfo({ msg: "Warp Failure", fix: "Signal lost. Check your connection or API key." });
+    } finally {
+      setIsProcessing(false);
     }
   };
 
   const handleBulkAction = async (action: string, payload?: any) => {
     if (selectedIds.length === 0) return;
     setIsProcessing(true);
-    const originalCount = selectedIds.length;
-    
     try {
       if (action === 'delete') {
         setFiles(prev => prev.filter(f => !selectedIds.includes(f.id)));
-        triggerGratification(`${originalCount} ITEMS DELETED`);
-      } 
-      else if (action === 'make-transparent' || action === 'center-icon') {
+        triggerGratification('PURGED');
+      } else if (action === 'make-transparent' || action === 'center-icon') {
         const updatedFiles = [...files];
         for (const id of selectedIds) {
             const idx = updatedFiles.findIndex(f => f.id === id);
@@ -177,21 +186,20 @@ const App: React.FC = () => {
             updatedFiles[idx] = { ...updatedFiles[idx], previewUrl: cleanUrl, blob: cleanBlob };
         }
         setFiles(updatedFiles);
-        triggerGratification(action === 'make-transparent' ? 'ALPHA SCRUBBED' : 'ALIGNMENT FIXED');
-      }
-      else if (action === 'reroll' || action === 'change-style' || action === 'guide-prompt') {
+        triggerGratification('ALPHA_FIXED');
+      } else if (action === 'reroll' || action === 'change-style' || action === 'guide-prompt') {
         const updatedFiles = [...files];
         for (const id of selectedIds) {
           const fileIdx = updatedFiles.findIndex(f => f.id === id);
           const source = sourceCache.current.get(id);
-          if (fileIdx === -1 || !source || !source.prompt) continue;
+          if (fileIdx === -1 || !source) continue;
 
           updatedFiles[fileIdx] = { ...updatedFiles[fileIdx], status: 'processing' };
           setFiles([...updatedFiles]);
 
-          let finalPrompt = source.prompt;
-          if (action === 'change-style') finalPrompt = `Icon: ${source.label}. Style: ${payload}. Clean professional icon.`;
-          else if (action === 'guide-prompt') finalPrompt = `Icon: ${payload}. ${source.label} theme. High detail.`;
+          let finalPrompt = source.prompt || source.label || "icon";
+          if (action === 'change-style') finalPrompt = `Icon representing ${source.label}. Style: ${payload}. Pro quality.`;
+          else if (action === 'guide-prompt') finalPrompt = `Icon of ${source.label}. ${payload}. High detail.`;
 
           const newDataUrl = await generateIconImage(finalPrompt);
           const tempImg = new Image();
@@ -208,165 +216,170 @@ const App: React.FC = () => {
           };
           setFiles([...updatedFiles]);
         }
-        triggerGratification('AI BLESSING APPLIED');
+        triggerGratification('REFORGED_BY_AI');
       }
-    } catch (e) {
-      setErrorInfo({ msg: "Forge Operation Failed", fix: "Try again or check API limits." });
     } finally {
       setSelectedIds([]);
       setIsProcessing(false);
     }
   };
 
-  const handleApplyPalette = (colors: string[]) => {
-    setEffects(prev => ({ 
-        ...prev, duotone: true, duotoneColor1: colors[0], duotoneColor2: colors[1],
-        glowColor: colors[2], outlineColor: colors[3]
+  const handleApplyPalette = useCallback((colors: string[]) => {
+    setEffects(prev => ({
+      ...prev,
+      duotone: true,
+      duotoneColor1: colors[0],
+      duotoneColor2: colors[1],
+      outlineColor: colors[2] || prev.outlineColor,
+      glowColor: colors[3] || prev.glowColor,
     }));
-    triggerGratification('PALETTE SYNCHRONIZED');
-    setSelectedIds([]);
-  };
+    triggerGratification('PALETTE_APPLIED');
+  }, []);
+
+  const handleImportPackToSmithy = useCallback(async (pack: GeneratedPackItem[]) => {
+    setIsProcessing(true);
+    const newFiles: ProcessedFile[] = [];
+    for (const item of pack) {
+      if (!item.blob || !item.previewUrl) continue;
+      const id = crypto.randomUUID();
+      const img = new Image();
+      await new Promise(res => { img.onload = res; img.src = item.previewUrl!; });
+      sourceCache.current.set(id, { id, image: img, rawUrl: item.previewUrl, fidelity: 100, label: item.label });
+      
+      newFiles.push({
+        id, originalName: `${item.label}.png`, newName: `${item.label}.${exportFormat}`,
+        blob: item.blob, previewUrl: item.previewUrl, status: 'completed', width: resolution,
+        height: resolution, originalType: 'image/png', fidelityScore: 100, isAiGenerated: true
+      });
+    }
+    setFiles(prev => [...newFiles, ...prev]);
+    setMode('upscale');
+    setIsProcessing(false);
+    triggerGratification('PACK_IMPORT_OK');
+  }, [resolution, exportFormat]);
 
   const handleDownloadZip = useCallback(async () => {
     if (files.length === 0) return;
     setIsProcessing(true);
     try {
       const zip = new JSZip();
-      files.forEach((file) => {
-        if (file.blob) zip.file(file.newName, file.blob);
-      });
+      for (const file of files) {
+        if (file.blob) {
+          zip.file(file.newName, file.blob);
+        }
+      }
       const content = await zip.generateAsync({ type: 'blob' });
-      saveAs(content, 'smithy-stash.zip');
-      triggerGratification('STASH EXPORTED');
-    } catch (err) {
-      setErrorInfo({ msg: "Export Error", fix: "Batch might be too large. Try fewer files." });
+      saveAs(content, `icosmithy_export_${Date.now()}.zip`);
+      triggerGratification('BATCH_EXPORTED');
+    } catch (e) {
+      setErrorInfo({ msg: "Export Error", fix: "Check if browser permits large downloads." });
     } finally {
       setIsProcessing(false);
     }
   }, [files]);
 
+  const handleToggleSelect = useCallback((id: string, isShift: boolean) => {
+    setSelectedIds(prev => {
+      if (isShift && lastSelectedId) {
+        const lastIdx = files.findIndex(f => f.id === lastSelectedId);
+        const currentIdx = files.findIndex(f => f.id === id);
+        if (lastIdx !== -1 && currentIdx !== -1) {
+          const start = Math.min(lastIdx, currentIdx);
+          const end = Math.max(lastIdx, currentIdx);
+          return Array.from(new Set([...prev, ...files.slice(start, end + 1).map(f => f.id)]));
+        }
+      }
+      setLastSelectedId(id);
+      return prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id];
+    });
+  }, [files, lastSelectedId]);
+
   return (
-    <div className={`min-h-screen transition-all duration-500 flex flex-col items-center ${isDarkMode ? 'bg-[#121212] text-slate-100' : 'bg-slate-50 text-slate-900'}`}>
-      
-      {/* Gratification Overlay */}
+    <div className={`min-h-screen transition-all duration-300 flex flex-col items-center p-6 ${isDarkMode ? 'bg-[#121212] text-slate-100' : 'bg-slate-200 text-slate-900'}`}>
       {lastAction && (
-        <div className="fixed top-8 left-1/2 -translate-x-1/2 z-[3000] bg-yellow-400 border-2 border-black px-10 py-4 shadow-[8px_8px_0_rgba(0,0,0,0.8)] flex items-center gap-6 animate-success-pop pointer-events-none">
-          <div className="p-2 bg-black text-yellow-400 animate-mosh-sparkle">
-             <Sparkles size={32} />
-          </div>
-          <div className="flex flex-col">
-            <span className="text-black font-black uppercase text-xl tracking-tighter leading-none">{lastAction}</span>
-            <span className="text-black/60 text-[8px] font-bold uppercase mt-1 tracking-widest">ICOSMITHY_OS: OP_COMPLETE</span>
+        <div className="fixed top-8 left-1/2 -translate-x-1/2 z-[3000] animate-success-pop">
+          <div className="retro-panel bg-yellow-400 px-8 py-4 flex items-center gap-4 border-4">
+            <Sparkles size={24} className="text-black animate-mosh-shake" />
+            <span className="text-black font-black uppercase text-sm tracking-widest">{lastAction}</span>
           </div>
         </div>
       )}
 
-      {/* Error Modal */}
       {errorInfo && (
-        <div className="fixed inset-0 z-[5000] bg-black/80 flex items-center justify-center p-6 backdrop-blur-md">
-            <div className="w-full max-w-lg bg-[#c6c6c6] border-4 border-black p-8 shadow-[12px_12px_0_#000] animate-error-shake">
-                <div className="flex items-center gap-4 mb-6 text-red-700">
-                    <AlertTriangle size={48} />
-                    <h2 className="text-2xl font-black uppercase tracking-tighter">FORGE ERROR</h2>
-                </div>
-                <div className="bg-white p-6 border-2 border-black mb-8 shadow-inner">
-                    <p className="text-[10px] text-slate-800 font-bold uppercase leading-relaxed">{errorInfo.fix}</p>
-                </div>
-                <button onClick={() => setErrorInfo(null)} className="w-full py-4 bg-red-600 text-white font-black uppercase text-xl border-2 border-black shadow-[4px_4px_0_#000] hover:brightness-110 active:scale-95 transition-all">DISMISS ALARM</button>
+        <div className="fixed inset-0 z-[5000] bg-black/80 flex items-center justify-center p-6 backdrop-blur-sm">
+            <div className="retro-panel border-red-600 border-4 p-8 max-w-md animate-error-shake">
+                <div className="flex items-center gap-4 mb-4 text-red-600"><AlertTriangle size={32} /><h2 className="text-xl font-black">FORGE FAILURE</h2></div>
+                <div className="retro-inset p-4 bg-white mb-6 text-[10px] font-bold text-black">{errorInfo.fix}</div>
+                <button onClick={() => setErrorInfo(null)} className="win-btn w-full bg-red-600 text-white">DISMISS</button>
             </div>
         </div>
       )}
 
-      {/* Toolboxes - Fixed Position Sidebar Container */}
+      {/* Floating Toolbar Sidebar */}
       <div className="toolbox-container">
-        {selectedIds.length > 0 && mode !== 'test' && (
-          <>
-            <ControlMatrix selectedIds={selectedIds} onAction={handleBulkAction} visible={true} />
-            <PaletteForge onApplyPalette={handleApplyPalette} visible={true} />
-          </>
+        {selectedIds.length > 0 && mode !== 'test' && toolboxOpen && (
+          <div className="pointer-events-auto flex flex-col gap-4 animate-in slide-in-from-left-4">
+            <ControlMatrix selectedIds={selectedIds} onAction={handleBulkAction} visible={true} onClose={() => setToolboxOpen(false)} />
+            <PaletteForge onApplyPalette={handleApplyPalette} visible={true} onClose={() => setToolboxOpen(false)} />
+          </div>
+        )}
+        {!toolboxOpen && selectedIds.length > 0 && (
+          <button onClick={() => setToolboxOpen(true)} className="win-btn bg-indigo-600 text-white p-2 pointer-events-auto shadow-xl">
+             <Hammer size={16} />
+          </button>
         )}
       </div>
 
-      <div className="w-full max-w-6xl px-6 py-10">
-        <div className="flex flex-col md:flex-row justify-between items-center mb-10 gap-6">
+      <div className="w-full max-w-5xl space-y-6">
+        <div className="flex justify-between items-center bg-black/10 p-4 rounded-lg">
             <Header />
-            <div className="flex gap-4">
-              {selectedIds.length > 0 && (
-                <RetroTooltip title="Batch Deselect" description="Clears current selection focus.">
-                  <button onClick={() => setSelectedIds([])} className="px-6 py-3 bg-red-700 border-2 border-black text-white text-[10px] font-bold uppercase shadow-[4px_4px_0_#000] hover:bg-red-600 active:scale-95 transition-all">DESELECT ({selectedIds.length})</button>
-                </RetroTooltip>
-              )}
-              <RetroTooltip title="Light/Dark" description="Switch interface contrast mode.">
-                <button onClick={() => setIsDarkMode(!isDarkMode)} className="p-3 bg-[#c6c6c6] border-2 border-black shadow-[4px_4px_0_#000,inset_1px_1px_0_#fff] hover:scale-105 active:scale-95 transition-all">
-                    {isDarkMode ? <Sun className="text-amber-500" size={24} /> : <Moon className="text-indigo-600" size={24} />}
-                </button>
-              </RetroTooltip>
+            <div className="flex gap-2">
+              {selectedIds.length > 0 && <button onClick={() => setSelectedIds([])} className="win-btn bg-red-700 text-white">CLEAR SELECTION ({selectedIds.length})</button>}
+              <button onClick={() => setIsDarkMode(!isDarkMode)} className="win-btn p-2">{isDarkMode ? <Sun size={18} /> : <Moon size={18} />}</button>
             </div>
         </div>
 
-        <main className="w-full">
-          {/* Main Navigation Tabs */}
-          <div className="flex justify-center gap-3 mb-10">
-              {[
-                { id: 'upscale', label: 'THE SMITHY', icon: Hammer },
-                { id: 'cauldron', label: 'THE CAULDRON', icon: Coffee },
-                { id: 'test', label: 'PREVIEW', icon: Monitor }
-              ].map(tab => (
-                <button 
-                    key={tab.id} 
-                    onClick={() => setMode(tab.id as any)} 
-                    className={`flex-1 md:flex-none px-8 py-4 text-[11px] font-black border-2 border-black uppercase tracking-[0.2em] transition-all flex items-center gap-3 justify-center
-                        ${mode === tab.id 
-                            ? 'bg-[#8b8b8b] text-white shadow-[4px_4px_0_#000,inset_2px_2px_0_#fff]' 
-                            : 'bg-[#555] text-white/50 hover:text-white shadow-[2px_2px_0_#000]'
-                        }`}
-                >
-                  <tab.icon size={16}/> {tab.label}
+        <nav className="flex justify-center gap-2">
+            {[
+              { id: 'upscale', label: 'THE SMITHY' },
+              { id: 'cauldron', label: 'THE CAULDRON' },
+              { id: 'test', label: 'FORGE PREVIEW' }
+            ].map(m => (
+                <button key={m.id} onClick={() => { setMode(m.id as any); setToolboxOpen(true); }} className={`win-btn flex-1 py-4 tracking-[0.2em] font-black ${mode === m.id ? 'bg-indigo-600 text-white shadow-none' : 'opacity-60'}`}>
+                    {m.label}
                 </button>
-              ))}
-          </div>
+            ))}
+        </nav>
 
-          <div className="min-h-[600px]">
+        <section className="min-h-[600px] w-full">
             {mode === 'cauldron' ? (
-              <div className="space-y-12 animate-in slide-in-from-bottom-4">
-                <Cauldron onPackGenerated={() => triggerGratification('PACK BREWED')} onImportToSmithy={handleImportPackToSmithy} onError={(msg, fix) => setErrorInfo({msg, fix})} />
-                {files.length > 0 && (
-                  <div className="mt-12 bg-[#222] p-6 border-2 border-black">
-                    <h3 className="text-[10px] font-bold uppercase text-slate-500 mb-6 border-b border-white/5 pb-2">STASHED ASSETS</h3>
-                    <Gallery files={files} selectedIds={selectedIds} onToggleSelect={handleToggleSelect} />
-                  </div>
-                )}
-              </div>
+                <Cauldron onPackGenerated={() => triggerGratification('PACK_GENERATED')} onImportToSmithy={handleImportPackToSmithy} onError={(msg, fix) => setErrorInfo({msg, fix})} />
             ) : mode === 'test' ? (
-              <div className="bg-[#c6c6c6] border-2 border-black shadow-[8px_8px_0_#000] p-8 animate-in zoom-in duration-300">
-                 <Desktop files={files} assignments={desktopAssignments} onAssign={(s, id) => setDesktopAssignments(prev => ({ ...prev, [s]: id }))} onError={(msg, fix) => setErrorInfo({msg, fix})} />
-              </div>
+                <Desktop 
+                  files={files} 
+                  assignments={desktopAssignments} 
+                  onAssign={(s, id) => setDesktopAssignments(prev => ({ ...prev, [s]: id }))} 
+                  onTeleport={handleTeleport}
+                  currentPerson={currentPerson}
+                  isProcessing={isProcessing}
+                />
             ) : (
-              <div className="space-y-8 animate-in fade-in duration-500">
-                <EffectsPanel effects={effects} setEffects={setEffects} disabled={isProcessing} onUndo={() => {}} canUndo={false} onError={(msg, fix) => setErrorInfo({ msg, fix })} />
-                <Controls resolution={resolution} setResolution={setResolution} exportFormat={exportFormat} setExportFormat={setExportFormat} onDownload={handleDownloadZip} onReset={() => setFiles([])} isProcessing={isProcessing} canDownload={files.length > 0} />
-                <DropZone onFilesSelected={handleFilesSelected} />
-                
-                <div className="mt-12">
-                    <div className="flex items-center justify-between mb-6 border-b-2 border-white/10 pb-4">
-                      <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-500">INVENTORY</h3>
-                      <button 
-                        onClick={() => setShowComparison(!showComparison)} 
-                        className="bg-[#333] border-2 border-black shadow-[2px_2px_0_#000] px-6 py-2 text-[9px] uppercase font-bold text-white hover:bg-black transition-all"
-                      >
-                        {showComparison ? "Gallery Mode" : "Comparison Mode"}
-                      </button>
+                <div className="space-y-6 animate-in fade-in duration-300">
+                    <EffectsPanel effects={effects} setEffects={setEffects} disabled={isProcessing} onUndo={()=>{}} canUndo={false} onError={(msg, fix) => setErrorInfo({msg, fix})} />
+                    <Controls resolution={resolution} setResolution={setResolution} exportFormat={exportFormat} setExportFormat={setExportFormat} onDownload={handleDownloadZip} onReset={() => setFiles([])} isProcessing={isProcessing} canDownload={files.length > 0} />
+                    <DropZone onFilesSelected={handleFilesSelected} />
+                    <div className="flex justify-between items-center border-b border-white/10 pb-2">
+                        <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest">STASHED_INVENTORY</h3>
+                        <button onClick={() => setShowComparison(!showComparison)} className="win-btn text-[8px]">{showComparison ? "NORMAL_VIEW" : "COMPARISON_VIEW"}</button>
                     </div>
                     <Gallery files={files} comparisonMode={showComparison} sources={sourceCache.current} selectedIds={selectedIds} onToggleSelect={handleToggleSelect} />
                 </div>
-              </div>
             )}
-          </div>
-        </main>
-        
-        <StickerClipboard stickers={effects.customStickers} processedIcons={files.filter(f => f.status === 'completed')} onAddSticker={(url) => setEffects(prev => ({ ...prev, customStickers: [...prev.customStickers, { id: crypto.randomUUID(), url, x: 50, y: 50, scale: 30, rotation: 0, texture: 'none' }] }))} onRemoveSticker={(id) => setEffects(prev => ({ ...prev, customStickers: prev.customStickers.filter(s => s.id !== id) }))} onBatchApply={() => {}} onGenerate={() => {}} onApplyTexture={(id, tex) => setEffects(prev => ({ ...prev, customStickers: prev.customStickers.map(s => s.id === id ? { ...s, texture: tex } : s) }))} />
-        <FloatingHelp onNav={(p) => setMode(p)} />
+        </section>
       </div>
+
+      <StickerClipboard stickers={effects.customStickers} processedIcons={files.filter(f => f.status === 'completed')} onAddSticker={(u, i) => setEffects(prev => ({ ...prev, customStickers: [...prev.customStickers, { id: crypto.randomUUID(), url: u, x: 50, y: 50, scale: 30, rotation: 0, texture: 'none' }] }))} onRemoveSticker={id => setEffects(prev => ({ ...prev, customStickers: prev.customStickers.filter(s => s.id !== id) }))} onBatchApply={()=>{}} onGenerate={()=>{}} onApplyTexture={(id, tex) => setEffects(prev => ({ ...prev, customStickers: prev.customStickers.map(s => s.id === id ? { ...s, texture: tex } : s) }))} />
+      <FloatingHelp onNav={p => setMode(p)} />
     </div>
   );
 };

@@ -62,7 +62,6 @@ export const DEFAULT_EFFECTS: BatchEffects = {
   removeBackground: false,
   normalizeInputs: true,
   smartUpscaleIntensity: 50,
-  // Animation settings
   isAnimated: false,
   animationType: 'float',
   animationSpeed: 5,
@@ -70,7 +69,6 @@ export const DEFAULT_EFFECTS: BatchEffects = {
   animationFrameCount: 12,
   animationFrameMode: 'linear',
   animationVicinityRange: 10,
-  // Procedural
   asciiMode: false,
   enchantmentGlint: false,
   crtEffect: false,
@@ -84,10 +82,6 @@ export function calculateFidelity(img: HTMLImageElement): number {
     return Math.min(100, Math.sqrt(area) / 1024 * 100);
 }
 
-/**
- * Robust alpha-scrubbing and content centering.
- * Fixes "all over the place" icons by finding actual pixel bounds.
- */
 export async function removeBgAndCenter(img: HTMLImageElement): Promise<Blob> {
     const canvas = document.createElement('canvas');
     canvas.width = img.width;
@@ -97,8 +91,8 @@ export async function removeBgAndCenter(img: HTMLImageElement): Promise<Blob> {
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = imageData.data;
 
-    // Scrub white/near-white backgrounds
-    const t = 225; // Sensitivity
+    // Threshold for "near white". AI generated white is often #FEFEFE or similar.
+    const t = 248; 
     let minX = canvas.width, minY = canvas.height, maxX = 0, maxY = 0;
     let hasContent = false;
 
@@ -107,48 +101,45 @@ export async function removeBgAndCenter(img: HTMLImageElement): Promise<Blob> {
             const i = (y * canvas.width + x) * 4;
             const r = data[i], g = data[i+1], b = data[i+2], a = data[i+3];
             
-            // Content check: not transparent and not white
-            if (a > 10 && (r < t || g < t || b < t)) {
+            // Content check: not transparent AND (not near-white)
+            const isWhite = r >= t && g >= t && b >= t;
+            if (a > 20 && !isWhite) {
                 if (x < minX) minX = x; if (x > maxX) maxX = x;
                 if (y < minY) minY = y; if (y > maxY) maxY = y;
                 hasContent = true;
             } else {
-                data[i+3] = 0; // Scrub
+                data[i+3] = 0; // Scrub to alpha
             }
         }
     }
 
-    // Fallback if the whole thing was white or empty
     if (!hasContent) return new Promise((res) => canvas.toBlob(b => res(b!), 'image/png'));
 
-    // Bounding Box Logic for Centering
     const contentW = maxX - minX + 1;
     const contentH = maxY - minY + 1;
     
-    // Ignore tiny fragments that might be noise from a sprite sheet slice
-    if (contentW < 10 || contentH < 10) return new Promise((res) => canvas.toBlob(b => res(b!), 'image/png'));
+    // Ignore noise fragments
+    if (contentW < 5 || contentH < 5) return new Promise((res) => canvas.toBlob(b => res(b!), 'image/png'));
 
     const final = document.createElement('canvas');
-    const size = Math.max(img.width, img.height);
+    const size = 1024; // Force high res for processed icons
     final.width = size;
     final.height = size;
     const fctx = final.getContext('2d')!;
 
-    // Scaling to fit nicely with padding
-    const drawSize = size * 0.8;
-    const scale = Math.min(drawSize / contentW, drawSize / contentH);
+    const drawArea = size * 0.75; // Leave breathing room
+    const scale = Math.min(drawArea / contentW, drawArea / contentH);
     
     const dw = contentW * scale;
     const dh = contentH * scale;
     const dx = (size - dw) / 2;
     const dy = (size - dh) / 2;
 
-    // Create a temporary content-only canvas
     const temp = document.createElement('canvas');
     temp.width = img.width; temp.height = img.height;
     temp.getContext('2d')!.putImageData(imageData, 0, 0);
 
-    fctx.clearRect(0,0,size,size);
+    fctx.clearRect(0, 0, size, size);
     fctx.drawImage(temp, minX, minY, contentW, contentH, dx, dy, dw, dh);
 
     return new Promise((res) => final.toBlob(b => res(b!), 'image/png'));
@@ -196,12 +187,6 @@ export async function upscaleAndEditImage(
       if (effects.animationType === 'float') animYOffset += Math.sin(time * speed) * 20 * intensity;
       else if (effects.animationType === 'pulse') animScale += Math.sin(time * speed) * 0.2 * intensity;
       else if (effects.animationType === 'spin') animRotate = time * speed * 30 * intensity;
-      else if (effects.animationType === 'jitter') {
-        animXOffset += (Math.random() - 0.5) * 12 * intensity;
-        animYOffset += (Math.random() - 0.5) * 12 * intensity;
-      }
-      else if (effects.animationType === 'bounce') animYOffset -= Math.abs(Math.sin(time * speed)) * 35 * intensity;
-      else if (effects.animationType === 'swing') animRotate = Math.sin(time * speed) * 15 * intensity;
     }
 
     const dw = sw * scaleFactor * animScale;
@@ -210,7 +195,6 @@ export async function upscaleAndEditImage(
     const dy = (targetSize - dh) / 2;
 
     ctx.imageSmoothingEnabled = fidelityFactor > 20 && effects.pixelDepth === 'none'; 
-    ctx.imageSmoothingQuality = 'high';
 
     const maskCanvas = document.createElement('canvas');
     maskCanvas.width = targetSize; maskCanvas.height = targetSize;
@@ -229,7 +213,7 @@ export async function upscaleAndEditImage(
     if (effects.removeBackground) {
         const mData = mctx.getImageData(0,0,targetSize,targetSize);
         const d = mData.data;
-        const t = 225; 
+        const t = 245; 
         for (let i=0; i<d.length; i+=4) {
             if (d[i] > t && d[i+1] > t && d[i+2] > t) d[i+3] = 0;
         }
